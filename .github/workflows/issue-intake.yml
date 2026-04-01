@@ -1,0 +1,392 @@
+name: Issue Intake
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  intake:
+    if: ${{ github.event.issue.user.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check issue compliance, route triage, and suggest duplicates
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const marker = "<!-- codelab-template-issue-intake -->";
+            const areaLabels = [
+              "area: automation",
+              "area: docs",
+              "area: source",
+              "area: tests",
+            ];
+            const areaMap = new Map([
+              ["automation", "area: automation"],
+              ["docs", "area: docs"],
+              ["source", "area: source"],
+              ["tests", "area: tests"],
+            ]);
+            const normalizeWhitespace = (value) => value.replace(/\s+/g, " ").trim();
+            const stopWords = new Set([
+              "about", "after", "before", "because", "feature", "issue", "pull",
+              "request", "project", "task", "there", "their", "would", "could",
+              "should", "today", "workflow", "report", "problem", "proposal",
+              "summary", "environment", "this", "that", "with", "from",
+            ]);
+
+            const templates = [
+              {
+                prefix: "[bug]",
+                name: "bug report",
+                sections: [
+                  { heading: "Area" },
+                  { heading: "Summary", placeholders: ["the project should..."] },
+                  { heading: "Reproduction", placeholders: ["1. open ...", "2. run ...", "3. observe ..."] },
+                  { heading: "Environment", placeholders: ["macos 15, node 22, pnpm 10"] },
+                ],
+              },
+              {
+                prefix: "[feature]",
+                name: "feature request",
+                sections: [
+                  { heading: "Area" },
+                  { heading: "Problem", placeholders: ["today the workflow is painful because..."] },
+                  { heading: "Proposal", placeholders: ["the project should let users..."] },
+                ],
+              },
+              {
+                prefix: "[task]",
+                name: "project task",
+                sections: [
+                  { heading: "Area" },
+                  { heading: "Goal", placeholders: ["what should this task accomplish?"] },
+                  { heading: "Definition of done", placeholders: ["how will maintainers know this task is complete?"] },
+                ],
+              },
+            ];
+
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            }
+
+            function extractSection(body, heading) {
+              const pattern = new RegExp(`### ${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n### |$)`, "i");
+              const match = body.match(pattern);
+              return match ? match[1].trim() : "";
+            }
+
+            function hasMeaningfulContent(value, placeholders = []) {
+              if (!value) {
+                return false;
+              }
+
+              const normalized = normalizeWhitespace(value.toLowerCase());
+              const compact = normalized.replace(/[`*_>#.\-\d\s]/g, "");
+              if (!compact || compact.length < 6) {
+                return false;
+              }
+
+              if (["no response", "n/a", "none", "todo", "tbd"].includes(normalized)) {
+                return false;
+              }
+
+              return !placeholders.some((placeholder) => normalized === normalizeWhitespace(placeholder.toLowerCase()));
+            }
+
+            function tokenize(value) {
+              return [...new Set(
+                (value.toLowerCase().match(/[a-z0-9]{4,}/g) || [])
+                  .filter((token) => !stopWords.has(token))
+              )];
+            }
+
+            function scoreCandidate(seedTokens, candidate) {
+              const candidateTokens = tokenize(`${candidate.title} ${candidate.body || ""}`);
+              const overlap = seedTokens.filter((token) => candidateTokens.includes(token));
+              const normalizedSeedTitle = normalizeWhitespace(issue.title.toLowerCase());
+              const normalizedCandidateTitle = normalizeWhitespace(candidate.title.toLowerCase());
+              const exactishTitle = normalizedSeedTitle.includes(normalizedCandidateTitle) || normalizedCandidateTitle.includes(normalizedSeedTitle);
+              return overlap.length + (exactishTitle ? 3 : 0);
+            }
+
+            async function ensureLabel(name, present) {
+              if (present) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  labels: [name],
+                });
+                return;
+              }
+
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  name,
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+              }
+            }
+
+            async function ensureAreaLabel(selectedLabel) {
+              for (const label of areaLabels) {
+                if (label === selectedLabel) {
+                  continue;
+                }
+
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number: issue.number,
+                    name: label,
+                  });
+                } catch (error) {
+                  if (error.status !== 404) {
+                    throw error;
+                  }
+                }
+              }
+
+              if (selectedLabel) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  labels: [selectedLabel],
+                });
+              }
+            }
+
+            function parseMaintainerConfig(raw) {
+              const config = {
+                triage_assignees: [],
+                pr_reviewers: [],
+              };
+              let currentKey = null;
+
+              for (const originalLine of raw.split(/\r?\n/)) {
+                const line = originalLine.replace(/\s+#.*$/, "");
+                if (!line.trim()) {
+                  continue;
+                }
+
+                const sectionMatch = line.match(/^([a-z_]+):\s*$/);
+                if (sectionMatch) {
+                  currentKey = sectionMatch[1];
+                  if (!(currentKey in config)) {
+                    throw new Error(`Unsupported key in .github/maintainers.yml: ${currentKey}`);
+                  }
+                  continue;
+                }
+
+                const itemMatch = line.match(/^\s*-\s*["']?@?([A-Za-z0-9_-]+)["']?\s*$/);
+                if (itemMatch && currentKey) {
+                  config[currentKey].push(itemMatch[1]);
+                  continue;
+                }
+
+                throw new Error(`Unsupported line in .github/maintainers.yml: ${originalLine}`);
+              }
+
+              if (!config.triage_assignees.length) {
+                throw new Error(".github/maintainers.yml must define at least one triage assignee.");
+              }
+
+              if (!config.pr_reviewers.length) {
+                throw new Error(".github/maintainers.yml must define at least one PR reviewer.");
+              }
+
+              for (const [key, values] of Object.entries(config)) {
+                if (values.some((value) => value.toUpperCase().includes("REPLACE"))) {
+                  throw new Error(`Replace placeholder values in .github/maintainers.yml for ${key} before using template automation.`);
+                }
+              }
+
+              return config;
+            }
+
+            async function loadMaintainerConfig() {
+              const response = await github.rest.repos.getContent({
+                owner,
+                repo,
+                path: ".github/maintainers.yml",
+              });
+
+              if (Array.isArray(response.data) || !response.data.content) {
+                throw new Error(".github/maintainers.yml must be a file in the repository root.");
+              }
+
+              const decoded = Buffer.from(response.data.content, "base64").toString("utf8");
+              return parseMaintainerConfig(decoded);
+            }
+
+            function pickMaintainer(list, seed, authorLogin) {
+              const unique = [...new Set(list)];
+              if (!unique.length) {
+                return null;
+              }
+
+              const normalizedAuthor = (authorLogin || "").toLowerCase();
+              const startIndex = seed % unique.length;
+
+              for (let offset = 0; offset < unique.length; offset += 1) {
+                const candidate = unique[(startIndex + offset) % unique.length];
+                if (candidate.toLowerCase() !== normalizedAuthor) {
+                  return candidate;
+                }
+              }
+
+              return null;
+            }
+
+            const maintainerConfig = await loadMaintainerConfig();
+
+            const template = templates.find((entry) => issue.title.toLowerCase().startsWith(entry.prefix));
+            const complianceProblems = [];
+            let selectedAreaLabel = null;
+
+            if (!template) {
+              complianceProblems.push("The issue title should start with `[bug]`, `[feature]`, or `[task]` so it matches one of the checked-in issue forms.");
+            } else {
+              for (const section of template.sections) {
+                const value = extractSection(issue.body || "", section.heading);
+                if (!hasMeaningfulContent(value, section.placeholders)) {
+                  complianceProblems.push(`\`${section.heading}\` is empty or still contains placeholder text for the ${template.name} form.`);
+                }
+              }
+
+              const areaValue = extractSection(issue.body || "", "Area");
+              selectedAreaLabel = areaMap.get((areaValue || "").toLowerCase()) || null;
+              if (!selectedAreaLabel) {
+                complianceProblems.push("`Area` must be one of Automation, Docs, Source, or Tests so triage automation can route the issue.");
+              }
+            }
+
+            const seedTokens = tokenize(issue.title).slice(0, 6);
+            let duplicateCandidates = [];
+
+            if (seedTokens.length >= 2) {
+              const searchQuery = `repo:${owner}/${repo} ${seedTokens.map((token) => `"${token}"`).join(" ")}`;
+              const result = await github.graphql(
+                `
+                  query SearchIssues($query: String!) {
+                    search(query: $query, type: ISSUE, first: 10) {
+                      nodes {
+                        ... on Issue {
+                          number
+                          title
+                          state
+                          url
+                          body
+                        }
+                        ... on PullRequest {
+                          number
+                          title
+                          state
+                          url
+                          body
+                        }
+                      }
+                    }
+                  }
+                `,
+                { query: searchQuery },
+              );
+
+              duplicateCandidates = result.search.nodes
+                .filter((candidate) => candidate.number !== issue.number)
+                .map((candidate) => ({ ...candidate, score: scoreCandidate(seedTokens, candidate) }))
+                .filter((candidate) => candidate.score >= 3)
+                .sort((left, right) => right.score - left.score)
+                .slice(0, 3);
+            }
+
+            const sections = [];
+            if (complianceProblems.length > 0) {
+              sections.push([
+                "This issue needs a small update before triage:",
+                complianceProblems.map((problem) => `- ${problem}`).join("\n"),
+                "Please edit the issue instead of opening a new one.",
+              ].join("\n\n"));
+            }
+
+            if (duplicateCandidates.length > 0) {
+              sections.push([
+                "Potentially related existing work:",
+                duplicateCandidates
+                  .map((candidate) => `- #${candidate.number} ${candidate.title} (${candidate.state.toLowerCase()})`)
+                  .join("\n"),
+                "If one of these is the canonical thread, comment there and a maintainer can close this issue with `/duplicate #123`.",
+              ].join("\n\n"));
+            }
+
+            const body = sections.length > 0 ? `${marker}\n\n${sections.join("\n\n---\n\n")}` : null;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: issue.number,
+            });
+            const existing = comments.find((comment) => comment.user.type === "Bot" && comment.body.includes(marker));
+
+            if (body) {
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body,
+                });
+              }
+            } else if (existing) {
+              await github.rest.issues.deleteComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+              });
+            }
+
+            await ensureLabel("needs: compliance", complianceProblems.length > 0);
+            await ensureLabel("needs: duplicate-review", duplicateCandidates.length > 0);
+            await ensureAreaLabel(selectedAreaLabel);
+
+            const currentAssignees = (issue.assignees || []).map((assignee) => assignee.login.toLowerCase());
+            const shouldAssign = currentAssignees.length === 0;
+
+            if (shouldAssign) {
+              const assignee = pickMaintainer(maintainerConfig.triage_assignees, issue.number, issue.user.login);
+              if (assignee) {
+                await github.rest.issues.addAssignees({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  assignees: [assignee],
+                });
+              } else {
+                core.info("No eligible triage assignee found after skipping the issue author.");
+              }
+            }

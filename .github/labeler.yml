@@ -1,0 +1,34 @@
+"area: automation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**/*"
+
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "*.md"
+          - "docs/**/*"
+
+"area: source":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/**/*"
+          - "app/**/*"
+          - "apps/**/*"
+          - "packages/**/*"
+          - "crates/**/*"
+          - "lib/**/*"
+
+"area: tests":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "test/**/*"
+          - "tests/**/*"
+          - "**/*.test.*"
+          - "**/*.spec.*"
+
+"kind: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "*.md"
+          - "docs/**/*"
