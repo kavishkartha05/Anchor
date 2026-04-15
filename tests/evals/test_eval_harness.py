@@ -1,8 +1,10 @@
-# tests/evals/test_harness.py
+# tests/evals/test_eval_harness.py
 from __future__ import annotations
 
 import uuid
+
 import pytest
+
 from anchor import Anchor
 from anchor.memory import ChromaMemoryStore
 
@@ -16,7 +18,7 @@ SEED_CHUNKS = [
 
 @pytest.fixture
 def anchor(ai_fn, light_ai_fn, embed_fn):
-    collection_name = f"test_harness_{uuid.uuid4().hex}"
+    collection_name = f"eval_harness_{uuid.uuid4().hex}"
     memory_store = ChromaMemoryStore(collection_name=collection_name)
     instance = Anchor(
         ai_fn=ai_fn,
@@ -35,8 +37,8 @@ def anchor(ai_fn, light_ai_fn, embed_fn):
 
 @pytest.mark.eval
 @pytest.mark.parametrize("run_number", range(5))
-def test_harness_single_hop(anchor, run_number):
-    """Sanity check — anchor retrieves a seeded fact and returns DONE."""
+def test_eval_harness_single_hop(anchor, run_number):
+    """Sanity check - anchor retrieves a seeded fact and returns DONE."""
     result = anchor.run("What is the project codename?")
     assert result.stop_reason == "done", f"Expected done, got {result.stop_reason!r}"
     assert (

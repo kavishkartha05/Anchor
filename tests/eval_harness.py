@@ -1,4 +1,4 @@
-# tests/harness.py
+# tests/eval_harness.py
 from __future__ import annotations
 
 import ollama as _ollama
