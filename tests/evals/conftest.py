@@ -1,8 +1,8 @@
-# tests/conftest.py
 from __future__ import annotations
 
 import pytest
-from tests.harness import OllamaEmbedFn, OllamaFn, is_ollama_running
+
+from tests.eval_harness import OllamaEmbedFn, OllamaFn, is_ollama_running
 
 
 @pytest.fixture(scope="session")
