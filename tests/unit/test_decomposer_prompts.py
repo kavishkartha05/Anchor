@@ -15,6 +15,7 @@ def _spy_model(response: str = ""):
 
     return model_fn, prompts
 
+
 # No-retrieval prompt path
 @pytest.mark.unit
 def test_no_retrieval_prompt_contains_grounding_language() -> None:
@@ -25,7 +26,10 @@ def test_no_retrieval_prompt_contains_grounding_language() -> None:
 
     prompt = prompts[0]
     assert "grounded strictly in the user question below" in prompt
-    assert "Do not invent, assume, or reference entities not explicitly mentioned" in prompt
+    assert (
+        "Do not invent, assume, or reference entities not explicitly mentioned"
+        in prompt
+    )
     assert f"User question: {gap}" in prompt
 
 
@@ -46,6 +50,7 @@ def test_retrieval_aware_prompt_contains_context_facts_and_rules() -> None:
     assert "fact about X" in prompt
     assert "Rules:" in prompt
 
+
 # History truncation — only last 6 of N messages included
 @pytest.mark.unit
 def test_history_truncation_keeps_last_six() -> None:
@@ -60,12 +65,12 @@ def test_history_truncation_keeps_last_six() -> None:
     for i in range(2, 8):
         assert f"msg{i}" in prompt
 
+
 # Retrieved items truncation — only first 8 of N items serialized
 @pytest.mark.unit
 def test_retrieved_items_truncated_to_eight() -> None:
     retrieved = [
-        {"id": f"item{i}", "questions": "", "content": f"content{i}"}
-        for i in range(10)
+        {"id": f"item{i}", "questions": "", "content": f"content{i}"} for i in range(10)
     ]
     model_fn, prompts = _spy_model("q")
 
@@ -76,6 +81,7 @@ def test_retrieved_items_truncated_to_eight() -> None:
         assert f"item{i}" in prompt
     assert "item8" not in prompt
     assert "item9" not in prompt
+
 
 # Gap insertion
 @pytest.mark.unit
